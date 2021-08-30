@@ -11,6 +11,7 @@
 #if PLATFORM_ANDROID
 #include "Android/AndroidJNI.h"
 #include "Android/AndroidApplication.h"
+#include "Android/AndroidJava.h"
 #elif PLATFORM_IOS
 #import <AppsFlyerLib/AppsFlyerLib.h>
 #import "UE4AFSDKDelegate.h"
@@ -38,26 +39,21 @@ extern "C" {
         // Java map to UE4 map
         jclass clsHashMap = env->GetObjectClass(attributionObject);
         jmethodID midKeySet = env->GetMethodID(clsHashMap, "keySet", "()Ljava/util/Set;");
-        jobject objKeySet = env->CallObjectMethod(attributionObject, midKeySet);
-        jclass clsSet = env->GetObjectClass(objKeySet);
+        auto objKeySet = FScopedJavaObject<jobject>(env, env->CallObjectMethod(attributionObject, midKeySet));
+
+        jclass clsSet = env->GetObjectClass(*objKeySet);
         jmethodID midToArray = env->GetMethodID(clsSet, "toArray", "()[Ljava/lang/Object;");
-        jobjectArray arrayOfKeys = (jobjectArray) env->CallObjectMethod(objKeySet, midToArray);
-        int arraySize = env->GetArrayLength(arrayOfKeys);
-        for (int i = 0; i < arraySize; ++i) {
-            jstring objKey = (jstring) env->GetObjectArrayElement(arrayOfKeys, i);
-            const char* c_string_key = env->GetStringUTFChars(objKey, 0);
-            // Get method
-            jmethodID midGet = env->GetMethodID(clsHashMap, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
-            
-            jclass strCls = env->FindClass("java/lang/String");
-            jmethodID toStrMethod = env->GetStaticMethodID(strCls, "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;");
-            
-            jobject objValue = env->CallObjectMethod(attributionObject, midGet, objKey);
-            jstring strValue = (jstring)env->CallStaticObjectMethod(strCls, toStrMethod, objValue);
-            
-            const char* c_string_value = env->GetStringUTFChars(strValue, 0);
-            map.Add(c_string_key, c_string_value);
+        auto arrayOfKeys = FScopedJavaObject<jobjectArray>(env, (jobjectArray)env->CallObjectMethod(*objKeySet, midToArray));
+        int32 arraySize = env->GetArrayLength(*arrayOfKeys);
+        int32 i = 0;
+        while (i < arraySize)
+        {
+      	    auto key = FJavaHelper::FStringFromLocalRef(env, (jstring)(env->GetObjectArrayElement(*arrayOfKeys, i++)));
+      	    auto value = FJavaHelper::FStringFromLocalRef(env, (jstring)(env->GetObjectArrayElement(*arrayOfKeys, i++)));
+
+      	    map.Add(*key, *value);
         }
+
         // Java map to UE4 map
         conversionData.InstallData = map;
         for (TObjectIterator<UAppsFlyerSDKCallbacks> Itr; Itr; ++Itr) {
@@ -66,11 +62,11 @@ extern "C" {
     }
     JNIEXPORT void JNICALL Java_com_appsflyer_AppsFlyer2dXConversionCallback_onInstallConversionFailureNative
     (JNIEnv *env, jobject obj, jstring stringError) {
-        jboolean isCopy;
-        const char *convertedValue = (env)->GetStringUTFChars(stringError, &isCopy);
+        const char *convertedValue = (env)->GetStringUTFChars(stringError, 0);
         for (TObjectIterator<UAppsFlyerSDKCallbacks> Itr; Itr; ++Itr) {
             Itr->OnConversionDataRequestFailure.Broadcast(convertedValue);
         }
+		env->ReleaseStringUTFChars(stringError, convertedValue);
     }
     JNIEXPORT void JNICALL Java_com_appsflyer_AppsFlyer2dXConversionCallback_onAppOpenAttributionNative
     (JNIEnv *env, jobject obj, jobject attributionObject) {}
@@ -127,15 +123,15 @@ UAppsFlyerSDKBlueprint::UAppsFlyerSDKBlueprint(const FObjectInitializer &ObjectI
 void UAppsFlyerSDKBlueprint::configure()
 {
     const UAppsFlyerSDKSettings *defaultSettings = GetDefault<UAppsFlyerSDKSettings>();
-    const bool isDebug = defaultSettings->bIsDebug; 
+    const bool isDebug = defaultSettings->bIsDebug;
 
 #if PLATFORM_ANDROID
     JNIEnv* env = FAndroidApplication::GetJavaEnv();
     jmethodID appsflyer =
         FJavaWrapper::FindMethod(env, FJavaWrapper::GameActivityClassID, "afStart", "(Ljava/lang/String;Z)V", false);
-    jstring key = env->NewStringUTF(TCHAR_TO_UTF8(*defaultSettings->appsFlyerDevKey));
+    auto key = FJavaClassObject::GetJString(defaultSettings->appsFlyerDevKey);
 
-    FJavaWrapper::CallVoidMethod(env, FJavaWrapper::GameActivityThis, appsflyer, key, isDebug);
+    FJavaWrapper::CallVoidMethod(env, FJavaWrapper::GameActivityThis, appsflyer, *key, isDebug);
 
 
 #elif PLATFORM_IOS
@@ -148,9 +144,9 @@ void UAppsFlyerSDKBlueprint::configure()
             // Set currency code if value not `empty`
             NSString *currencyCode = defaultSettings->currencyCode.GetNSString();
             if (!AppsFlyerIsEmptyValue(currencyCode)) {
-                [AppsFlyerLib shared].currencyCode = currencyCode;   
+                [AppsFlyerLib shared].currencyCode = currencyCode;
             }
-            
+
             FIOSCoreDelegates::OnOpenURL.AddStatic(&OnOpenURL);
             UE4AFSDKDelegate *delegate = [[UE4AFSDKDelegate alloc] init];
             delegate.onConversionDataSuccess = onConversionDataSuccess;
@@ -168,7 +164,7 @@ void UAppsFlyerSDKBlueprint::configure()
             }
 
             UE_LOG(LogAppsFlyerSDKBlueprint, Display, TEXT("AppsFlyer: UE4 ready"));
-            
+
             [[AppsFlyerLib shared] start];
             [[NSNotificationCenter defaultCenter] addObserverForName: UIApplicationWillEnterForegroundNotification
             object: nil
@@ -203,8 +199,8 @@ void UAppsFlyerSDKBlueprint::setCustomerUserId(FString customerUserId) {
                                   FJavaWrapper::GameActivityClassID,
                                   "afSetCustomerUserId",
                                   "(Ljava/lang/String;)V", false);
-    jstring jCustomerUserId = env->NewStringUTF(TCHAR_TO_UTF8(*customerUserId));
-    FJavaWrapper::CallVoidMethod(env, FJavaWrapper::GameActivityThis, setCustomerUserId, jCustomerUserId);
+	auto jCustomerUserId = FJavaClassObject::GetJString(customerUserId);
+    FJavaWrapper::CallVoidMethod(env, FJavaWrapper::GameActivityThis, setCustomerUserId, *jCustomerUserId);
 #elif PLATFORM_IOS
     dispatch_async(dispatch_get_main_queue(), ^ {
         [[AppsFlyerLib shared] setCustomerUserID:customerUserId.GetNSString()];
@@ -218,15 +214,17 @@ void UAppsFlyerSDKBlueprint::logEvent(FString eventName, TMap <FString, FString>
                            FJavaWrapper::GameActivityClassID,
                            "afLogEvent",
                            "(Ljava/lang/String;Ljava/util/Map;)V", false);
-    jstring jEventName = env->NewStringUTF(TCHAR_TO_UTF8(*eventName));
+    auto jEventName = FJavaClassObject::GetJString(eventName);
     jclass mapClass = env->FindClass("java/util/HashMap");
     jmethodID mapConstructor = env->GetMethodID(mapClass, "<init>", "()V");
-    jobject map = env->NewObject(mapClass, mapConstructor);
+    auto map = FScopedJavaObject<jobject>(env, env->NewObject(mapClass, mapConstructor));
     jmethodID putMethod = env->GetMethodID(mapClass, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
     for (const TPair<FString, FString>& pair : values) {
-        env->CallObjectMethod(map, putMethod, env->NewStringUTF(TCHAR_TO_UTF8(*pair.Key)), env->NewStringUTF(TCHAR_TO_UTF8(*pair.Value)));
+        auto Key = FJavaClassObject::GetJString(pair.Key);
+        auto Value = FJavaClassObject::GetJString(pair.Value);
+        env->CallObjectMethod(*map, putMethod, *Key, *Value);
     }
-    FJavaWrapper::CallVoidMethod(env, FJavaWrapper::GameActivityThis, logEvent, jEventName, map);
+    FJavaWrapper::CallVoidMethod(env, FJavaWrapper::GameActivityThis, logEvent, *jEventName, *map);
 #elif PLATFORM_IOS
     dispatch_async(dispatch_get_main_queue(), ^ {
         NSMutableDictionary *dictionary = [NSMutableDictionary dictionary];
@@ -258,12 +256,7 @@ FString UAppsFlyerSDKBlueprint::getAppsFlyerUID() {
                                 FJavaWrapper::GameActivityClassID,
                                 "afGetAppsFlyerUID",
                                 "()Ljava/lang/String;", false);
-        jstring AppsFlyerUID = (jstring)FJavaWrapper::CallObjectMethod(Env, FJavaWrapper::GameActivityThis, MethodId);
-        const char* cAppsFlyerUID = Env->GetStringUTFChars(AppsFlyerUID, 0);
-
-        ResultStr = FString(cAppsFlyerUID);
-        Env->ReleaseStringUTFChars(AppsFlyerUID, cAppsFlyerUID);
-        Env->DeleteLocalRef(AppsFlyerUID);
+        ResultStr = FJavaHelper::FStringFromLocalRef(Env, (jstring)FJavaWrapper::CallObjectMethod(Env, FJavaWrapper::GameActivityThis, MethodId));
     }
     return ResultStr;
 #elif PLATFORM_IOS
@@ -294,5 +287,3 @@ void UAppsFlyerSDKBlueprint::waitForATTUserAuthorizationWithTimeoutInterval(int 
     });
 #endif
 }
-
-
